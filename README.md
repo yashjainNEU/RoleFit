@@ -1,4 +1,3 @@
-echo "# Resume Analyzer
 
 AI-powered resume analysis tool built with Next.js and Python.
 
