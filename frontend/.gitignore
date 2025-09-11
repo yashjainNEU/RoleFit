@@ -39,3 +39,26 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Add these lines to your existing .gitignore file
+
+# Backend (Python)
+backend/venv/
+backend/__pycache__/
+backend/*.pyc
+backend/.env
+backend/*.log
+
+# Environment files (CRITICAL - contains API keys)
+.env
+.env.local
+.env.production
+.env.development
+
+# Python cache
+*.pyc
+__pycache__/
+
+# Virtual environments
+venv/
+env/
