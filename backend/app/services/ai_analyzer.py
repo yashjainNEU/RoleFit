@@ -1,4 +1,4 @@
-# app/services/ai_analyzer.py
+# app/services/ai_analyzer.py - Enhanced Validation Version
 
 import os
 import json
@@ -8,21 +8,13 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel
 from fastapi import HTTPException
 import logging
+import re
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Pydantic models for structured responses
 class AnalysisResult(BaseModel):
-    """
-    Structured model for AI analysis results.
-    
-    Backend Engineering Concept: Data Transfer Objects (DTOs)
-    - Ensures consistent response structure
-    - Type safety and validation
-    - Easy serialization to JSON
-    """
     ats_score: int
     strengths: List[str]
     improvements: List[str]
@@ -32,18 +24,7 @@ class AnalysisResult(BaseModel):
     confidence_score: float
 
 class AIAnalyzer:
-    """
-    Service class for AI-powered resume analysis.
-    
-    Key Learning Concepts:
-    - Singleton pattern for API client
-    - Async programming for external API calls
-    - Prompt engineering for specific tasks
-    - Error handling and retry logic
-    """
-    
     def __init__(self):
-        """Initialize OpenAI client with API key from environment."""
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable not set")
@@ -53,17 +34,6 @@ class AIAnalyzer:
         self.max_tokens = 2000
         
     async def analyze_resume(self, resume_text: str, job_description: str) -> AnalysisResult:
-        """
-        Analyze resume against job description using AI.
-        
-        Args:
-            resume_text: Extracted text from resume
-            job_description: Job posting text
-            
-        Returns:
-            AnalysisResult with scores and recommendations
-        """
-        
         # Input validation
         if not resume_text.strip():
             raise HTTPException(status_code=400, detail="Resume text is empty")
@@ -71,61 +41,219 @@ class AIAnalyzer:
         if not job_description.strip():
             raise HTTPException(status_code=400, detail="Job description is empty")
         
-        # Truncate inputs if too long (cost optimization)
+        # Debug logging
+        logger.info(f"Resume length: {len(resume_text)} characters")
+        logger.info(f"Job description length: {len(job_description)} characters")
+        logger.info(f"Job description preview: {job_description[:100]}...")
+        
+        # Enhanced validation with dummy text detection
+        is_meaningful = self._is_meaningful_job_description(job_description)
+        logger.info(f"Job description is meaningful: {is_meaningful}")
+        
+        if not is_meaningful:
+            logger.info("Returning no-job-description analysis")
+            return self._generate_no_job_description_analysis(resume_text)
+        
+        # Truncate inputs if too long
         resume_text = self._truncate_text(resume_text, 3000)
         job_description = self._truncate_text(job_description, 2000)
         
         try:
             # Generate analysis using AI
+            logger.info("Calling OpenAI API for analysis")
             analysis_data = await self._generate_analysis(resume_text, job_description)
             
             # Parse and validate response
-            return self._parse_analysis_response(analysis_data)
+            result = self._parse_analysis_response(analysis_data)
+            logger.info(f"Final analysis result: missing_keywords={len(result.missing_keywords)}, keyword_matches={len(result.keyword_matches)}")
+            
+            return result
             
         except Exception as e:
             logger.error(f"AI analysis failed: {str(e)}")
-            # Return fallback analysis instead of failing completely
             return self._generate_fallback_analysis(resume_text, job_description)
     
+    def _is_meaningful_job_description(self, job_description: str) -> bool:
+        """
+        ENHANCED: Detects dummy text, Lorem Ipsum, and other non-job content.
+        """
+        cleaned = job_description.strip().lower()
+        
+        # Check minimum length
+        if len(cleaned) < 30:
+            logger.info("Job description too short")
+            return False
+        
+        # CRITICAL FIX: Detect Lorem Ipsum and dummy text patterns
+        lorem_ipsum_indicators = [
+            'lorem ipsum', 'dolor sit amet', 'consectetur adipiscing',
+            'sed do eiusmod', 'tempor incididunt', 'labore et dolore',
+            'magna aliqua', 'enim ad minim', 'veniam quis nostrud',
+            'exercitation ullamco', 'laboris nisi', 'aliquip ex ea',
+            'commodo consequat', 'duis aute irure', 'reprehenderit in voluptate',
+            'esse cillum', 'fugiat nulla pariatur', 'excepteur sint occaecat',
+            'cupidatat non proident', 'sunt in culpa'
+        ]
+        
+        # Check for Lorem Ipsum
+        lorem_count = sum(1 for phrase in lorem_ipsum_indicators if phrase in cleaned)
+        if lorem_count >= 2:
+            logger.info(f"Detected Lorem Ipsum text ({lorem_count} indicators found)")
+            return False
+        
+        # Check for other dummy text patterns
+        dummy_text_patterns = [
+            'dummy text', 'placeholder text', 'sample text',
+            'test content', 'filler text', 'example text',
+            'typesetting industry', 'printing industry',
+            'galley of type', 'type specimen book',
+            'letraset sheets', 'aldus pagemaker',
+            'desktop publishing software'
+        ]
+        
+        dummy_count = sum(1 for pattern in dummy_text_patterns if pattern in cleaned)
+        if dummy_count >= 2:
+            logger.info(f"Detected dummy/placeholder text ({dummy_count} patterns found)")
+            return False
+        
+        # Check for repetitive random patterns
+        words = cleaned.split()
+        if len(words) < 5:
+            logger.info("Job description has too few words")
+            return False
+        
+        # Detect obviously fake content
+        random_patterns = 0
+        for word in words[:15]:  # Check first 15 words
+            if len(word) > 3:
+                # Check if word is mostly repeated characters
+                if len(set(word)) <= 2 and len(word) > 4:
+                    random_patterns += 1
+                # Check for keyboard patterns
+                if word in ['asdf', 'qwerty', 'zxcv', 'asdfgh', 'qwertyui']:
+                    random_patterns += 5
+        
+        if random_patterns > 2:
+            logger.info("Job description contains random keyboard patterns")
+            return False
+        
+        # Check for actual job-related content (more comprehensive)
+        job_indicators = [
+            # Core job terms
+            'experience', 'required', 'responsibilities', 'qualifications', 'skills',
+            'role', 'position', 'candidate', 'team', 'work', 'job',
+            
+            # Action words
+            'develop', 'manage', 'support', 'create', 'build', 'design',
+            'implement', 'maintain', 'collaborate', 'lead', 'analyze',
+            
+            # Technical terms
+            'technical', 'development', 'engineering', 'programming',
+            'software', 'application', 'system', 'technology', 'tools',
+            
+            # Business terms
+            'business', 'project', 'client', 'customer', 'product',
+            'service', 'solutions', 'requirements', 'processes',
+            
+            # Qualification terms
+            'degree', 'education', 'certification', 'training',
+            'knowledge', 'ability', 'expertise', 'proficiency'
+        ]
+        
+        indicator_count = sum(1 for indicator in job_indicators if indicator in cleaned)
+        logger.info(f"Found {indicator_count} job indicators")
+        
+        # Need at least 3 real job indicators (increased from 1)
+        if indicator_count < 3:
+            logger.info("Not enough job indicators found")
+            
+            # Additional check for professional terms
+            professional_terms = [
+                'company', 'organization', 'department', 'office',
+                'salary', 'benefits', 'remote', 'onsite', 'hybrid',
+                'full-time', 'part-time', 'contract', 'permanent'
+            ]
+            
+            professional_count = sum(1 for term in professional_terms if term in cleaned)
+            logger.info(f"Found {professional_count} professional terms")
+            
+            # Need both job indicators AND professional terms
+            if indicator_count < 2 or professional_count < 1:
+                return False
+        
+        # Final check: ensure it's not just marketing copy or generic text
+        # Real job descriptions should mention specific requirements or skills
+        specific_terms = [
+            'python', 'java', 'javascript', 'react', 'angular', 'vue',
+            'sql', 'database', 'api', 'aws', 'azure', 'docker',
+            'git', 'agile', 'scrum', 'testing', 'debugging',
+            'bachelor', 'master', 'degree', 'years of experience',
+            'minimum', 'preferred', 'must have', 'should have'
+        ]
+        
+        specific_count = sum(1 for term in specific_terms if term in cleaned)
+        logger.info(f"Found {specific_count} specific job terms")
+        
+        # Either have good job indicators OR specific requirements
+        if indicator_count >= 3 or (indicator_count >= 2 and specific_count >= 1):
+            return True
+        
+        return False
+    
+    def _generate_no_job_description_analysis(self, resume_text: str) -> AnalysisResult:
+        """Return analysis when job description is not meaningful."""
+        logger.info("Generating no-job-description analysis")
+        return AnalysisResult(
+            ats_score=0,  # Changed to 0 for invalid input
+            strengths=[
+                "Resume successfully uploaded and processed",
+                "Document structure is readable"
+            ],
+            improvements=[
+                "Please provide a real job description for analysis",
+                "Job description should contain actual job requirements, responsibilities, and qualifications",
+                "Avoid using placeholder text, Lorem Ipsum, or dummy content",
+                "Include specific skills, experience requirements, and role details"
+            ],
+            missing_keywords=[],
+            keyword_matches=[],
+            overall_feedback="Cannot perform analysis with placeholder or dummy text. Please provide a genuine job posting with specific requirements, responsibilities, and qualifications.",
+            confidence_score=0.0
+        )
+    
     async def _generate_analysis(self, resume_text: str, job_description: str) -> Dict:
-        """
-        Generate AI analysis using OpenAI API.
+        """Generate AI analysis with strict instructions."""
         
-        Learning Concept: Prompt Engineering
-        - Structured prompts for consistent outputs
-        - JSON format requests for structured data
-        - Context setting for domain expertise
-        """
-        
-        system_prompt = """You are an expert ATS (Applicant Tracking System) analyst and career counselor. 
-        Your job is to analyze resumes against job descriptions and provide actionable feedback.
+        system_prompt = """You are an expert ATS analyst. Your job is to compare the resume against the SPECIFIC job description provided.
 
-        Analyze the resume and job description, then respond with a JSON object containing:
-        - ats_score: Integer from 0-100 (how well resume matches job requirements)
-        - strengths: Array of 3-5 specific strengths found in the resume
-        - improvements: Array of 3-5 specific, actionable improvement suggestions
-        - missing_keywords: Array of important keywords from job description missing in resume
-        - keyword_matches: Array of keywords that match between resume and job description
-        - overall_feedback: 2-3 sentence summary of the analysis
-        - confidence_score: Float from 0.0-1.0 indicating analysis confidence
+CRITICAL INSTRUCTIONS:
+1. ONLY analyze if the job description appears to be a real job posting
+2. If the job description contains Lorem Ipsum, placeholder text, or dummy content, respond with an error
+3. Extract specific skills, technologies, and requirements ONLY from the actual job description
+4. Do NOT add general industry knowledge or assume requirements
+5. Be literal and precise in your keyword matching
 
-        Focus on:
-        1. ATS compatibility (formatting, keywords, structure)
-        2. Job requirement alignment
-        3. Quantifiable achievements
-        4. Industry-specific terminology
-        5. Professional presentation
+You must respond with a JSON object containing:
+- ats_score: Integer 0-100 based on actual job requirements match
+- strengths: Array of specific strengths found in resume relative to job description
+- improvements: Array of specific improvements needed for this job
+- missing_keywords: Array of terms from job description not found in resume
+- keyword_matches: Array of terms found in both resume and job description
+- overall_feedback: Brief summary based on actual comparison
+- confidence_score: Float 0.0-1.0
 
-        Be specific and actionable in recommendations."""
+If job description appears to be placeholder/dummy text, return ats_score: 0 and explain the issue."""
 
         user_prompt = f"""
-        RESUME:
-        {resume_text}
+RESUME TEXT:
+{resume_text}
 
-        JOB DESCRIPTION:
-        {job_description}
+JOB DESCRIPTION:
+{job_description}
 
-        Provide detailed analysis as JSON only."""
+Analyze this resume against the specific job description. Only extract keywords and requirements that are explicitly mentioned in the job description above.
+
+Respond with JSON only."""
 
         try:
             response = await self.client.chat.completions.create(
@@ -135,15 +263,28 @@ class AIAnalyzer:
                     {"role": "user", "content": user_prompt}
                 ],
                 max_tokens=self.max_tokens,
-                temperature=0.3,  # Lower temperature for more consistent responses
-                response_format={"type": "json_object"}  # Ensures JSON response
+                temperature=0.1,  # Very low temperature for precise analysis
+                response_format={"type": "json_object"}
             )
             
-            # Extract and parse JSON response
             content = response.choices[0].message.content
             analysis_data = json.loads(content)
             
-            logger.info("AI analysis completed successfully")
+            # If AI detected dummy text, return appropriate response
+            if analysis_data.get("ats_score", 0) == 0:
+                logger.info("AI detected invalid job description")
+                return {
+                    "ats_score": 0,
+                    "strengths": ["Resume processed successfully"],
+                    "improvements": ["Please provide a real job description"],
+                    "missing_keywords": [],
+                    "keyword_matches": [],
+                    "overall_feedback": "Invalid job description provided. Please use a real job posting.",
+                    "confidence_score": 0.0
+                }
+            
+            logger.info(f"AI returned {len(analysis_data.get('missing_keywords', []))} missing keywords and {len(analysis_data.get('keyword_matches', []))} matches")
+            
             return analysis_data
             
         except json.JSONDecodeError as e:
@@ -155,26 +296,18 @@ class AIAnalyzer:
             raise HTTPException(status_code=500, detail="AI analysis service unavailable")
     
     def _parse_analysis_response(self, analysis_data: Dict) -> AnalysisResult:
-        """
-        Parse and validate AI response into structured format.
-        
-        Learning Concept: Data Validation
-        - Ensure AI responses meet expected structure
-        - Handle missing or invalid fields gracefully
-        - Type conversion and bounds checking
-        """
+        """Parse and validate AI response into structured format."""
         
         try:
-            # Validate and extract required fields with defaults
-            ats_score = max(0, min(100, int(analysis_data.get("ats_score", 50))))
+            ats_score = max(0, min(100, int(analysis_data.get("ats_score", 0))))
             
-            strengths = analysis_data.get("strengths", [])[:5]  # Limit to 5
+            strengths = analysis_data.get("strengths", [])[:5]
             improvements = analysis_data.get("improvements", [])[:5]
             missing_keywords = analysis_data.get("missing_keywords", [])[:10]
             keyword_matches = analysis_data.get("keyword_matches", [])[:10]
             
             overall_feedback = analysis_data.get("overall_feedback", "Analysis completed")
-            confidence_score = max(0.0, min(1.0, float(analysis_data.get("confidence_score", 0.8))))
+            confidence_score = max(0.0, min(1.0, float(analysis_data.get("confidence_score", 0.0))))
             
             return AnalysisResult(
                 ats_score=ats_score,
@@ -188,89 +321,50 @@ class AIAnalyzer:
             
         except (KeyError, ValueError, TypeError) as e:
             logger.error(f"Failed to parse analysis response: {e}")
-            # Return fallback if parsing fails
-            return self._generate_fallback_analysis("", "")
+            return self._generate_no_job_description_analysis("")
     
     def _generate_fallback_analysis(self, resume_text: str, job_description: str) -> AnalysisResult:
-        """
-        Generate fallback analysis when AI fails.
+        """Generate fallback analysis when AI fails."""
         
-        Learning Concept: Graceful Degradation
-        - Always provide value to users, even when external services fail
-        - Basic analysis using simple algorithms
-        - Clearly indicate when fallback is used
-        """
+        logger.info("Generating fallback analysis")
         
-        # Simple keyword matching for fallback
-        resume_words = set(resume_text.lower().split())
-        job_words = set(job_description.lower().split())
+        if not self._is_meaningful_job_description(job_description):
+            return self._generate_no_job_description_analysis(resume_text)
         
-        # Common tech keywords to look for
-        tech_keywords = {
-            'python', 'javascript', 'react', 'fastapi', 'sql', 'api', 
-            'machine learning', 'ai', 'backend', 'frontend', 'database'
-        }
-        
-        job_tech_words = job_words.intersection(tech_keywords)
-        resume_tech_words = resume_words.intersection(tech_keywords)
-        matches = list(job_tech_words.intersection(resume_tech_words))
-        missing = list(job_tech_words - resume_tech_words)
-        
-        # Calculate basic score
-        match_ratio = len(matches) / max(len(job_tech_words), 1)
-        basic_score = int(match_ratio * 70 + 30)  # Base score of 30
-        
+        # Simple fallback only for valid job descriptions
         return AnalysisResult(
-            ats_score=basic_score,
+            ats_score=40,
             strengths=[
-                "Resume successfully uploaded and processed",
-                "Basic formatting appears readable",
-                f"Found {len(matches)} relevant skill matches" if matches else "Content structure is parseable"
+                "Resume processed successfully",
+                "Document format is readable"
             ],
             improvements=[
-                "Consider adding more specific technical keywords",
-                "Include quantifiable achievements and metrics",
-                "Ensure ATS-friendly formatting (AI analysis unavailable)"
+                "AI analysis temporarily unavailable",
+                "Please try again later for detailed feedback"
             ],
-            missing_keywords=missing[:5],
-            keyword_matches=matches[:5],
-            overall_feedback="Basic analysis completed. AI-powered analysis temporarily unavailable, showing keyword-based results.",
-            confidence_score=0.3
+            missing_keywords=[],
+            keyword_matches=[],
+            overall_feedback="Fallback analysis mode. AI service temporarily unavailable.",
+            confidence_score=0.2
         )
     
     def _truncate_text(self, text: str, max_length: int) -> str:
-        """
-        Truncate text to prevent API token limits.
-        
-        Learning Concept: Cost Optimization
-        - API calls are charged per token
-        - Truncate intelligently to preserve important content
-        - Balance between cost and analysis quality
-        """
+        """Truncate text to prevent API token limits."""
         if len(text) <= max_length:
             return text
         
-        # Try to truncate at sentence boundary
         truncated = text[:max_length]
         last_period = truncated.rfind('.')
         
-        if last_period > max_length * 0.8:  # If we can preserve 80% and end on sentence
+        if last_period > max_length * 0.8:
             return truncated[:last_period + 1]
         
         return truncated + "..."
 
-# Singleton instance for reuse
+# Singleton instance
 _ai_analyzer_instance = None
 
 async def get_ai_analyzer() -> AIAnalyzer:
-    """
-    Get or create AIAnalyzer instance.
-    
-    Learning Concept: Dependency Injection
-    - Reuse expensive-to-create objects
-    - Easy to mock for testing
-    - Centralized configuration
-    """
     global _ai_analyzer_instance
     
     if _ai_analyzer_instance is None:
@@ -278,12 +372,6 @@ async def get_ai_analyzer() -> AIAnalyzer:
     
     return _ai_analyzer_instance
 
-# Main function for easy importing
 async def analyze_resume_with_ai(resume_text: str, job_description: str) -> AnalysisResult:
-    """
-    Convenience function for resume analysis.
-    
-    This is the main function other parts of your application will call.
-    """
     analyzer = await get_ai_analyzer()
     return await analyzer.analyze_resume(resume_text, job_description)
